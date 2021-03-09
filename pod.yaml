@@ -1,0 +1,6 @@
+api: 1.0.0-beta1
+runtime: executable
+podVersion: 0.0.7
+
+executable:
+    file: proxy-wrapper

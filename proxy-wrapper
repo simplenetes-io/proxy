@@ -1,0 +1,556 @@
+#!/usr/bin/env sh
+# Work In Progress (WIP).
+# This is a wrapper over the proxy, it implements some of the Simplenetes Pod API so it can be managed as a Simplenetes Pod.
+# Note that all functions here have been manually extracted from the podman-runtime script.
+
+export LOG_LEVEL=debug
+
+PRINT()
+{
+    local color=''
+    local header=''
+    [ "${3:-1}" = 1 ] && {
+        local _SPACE_NAME="${_SPACE_NAME:-anonymous}: ";
+    } || {
+        local _SPACE_NAME="";
+    }
+
+    case "${2:-info}" in
+        error)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 1 ]; then return; fi
+            header="[ERROR] "; color="\033[31m"
+            ;;
+        security)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 1 ]; then return; fi
+            header="[SEC]   "; color="\033[35m"
+            ;;
+        warning)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 2 ]; then return; fi
+            header="[WARN]  "; color="\033[33m"
+            ;;
+        ok)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 3 ]; then return; fi
+            header="[OK]    "; color="\033[32m"
+            ;;
+        info)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 4 ]; then return; fi
+            header="[INFO]  "; color="\033[37m"
+            ;;
+        debug)
+            if [ "${SPACE_LOG_LEVEL:-4}" -lt 5 ]; then return; fi
+            header="[DEBUG] "; color=""
+            ;;
+        *)
+            return
+            ;;
+    esac
+    if [ "${SPACE_LOG_ENABLE_COLORS}" = "1" ] && [ -t 2 ]; then
+        printf "${color}%s%s%s\033[0m\n" "${header}" "${_SPACE_NAME}" "${1}" >&2
+    else
+        printf "%s%s%s\n" "${header}" "${_SPACE_NAME}" "${1}" >&2
+    fi
+}
+
+_STOP()
+{
+    local pid="$(_DAEMON_PID)"
+    if [ -n "${pid}" ]; then
+        PRINT "Proxy daemon running on pid ${pid}, terminating it." "info" 0
+        kill "${pid}"
+        while kill -0 "${pid}" 2>/dev/null; do
+            sleep 1
+        done
+    fi
+}
+
+_KILL()
+{
+    local pid="$(_DAEMON_PID)"
+    if [ -n "${pid}" ]; then
+        PRINT "Proxy daemon running on pid ${pid}, killing it." "info" 0
+        kill -s USR2 "${pid}"
+    fi
+}
+
+_START()
+{
+    local pid="$(_DAEMON_PID)"
+    if [ -n "${pid}" ]; then
+        PRINT "Proxy daemon already running on pid ${pid}" "info" 0
+        return
+    fi
+
+    # Create the daemon process, in a new session (setsid)
+    local pid=
+    if ! pid="$(setsid $0 porcelain-create)"; then
+        PRINT "Could not create daemon process" "error" 0
+        return 1
+    fi
+}
+
+# Get the DAEMON pid and check so that it is valid (it is not valid after a reboot).
+_DAEMON_PID()
+{
+    local statusFile="${POD_FILE}.status"
+
+    if [ ! -f "${statusFile}" ]; then
+        return
+    fi
+
+    # Read the file
+    local contents=
+    contents="$(cat "${statusFile}")"
+
+    # Check so that PID still exists
+    local pid="$(printf "%s\\n" "${contents}" |grep "pid:")"
+    pid="${pid#*:}"
+    STRING_TRIM "pid"
+
+    if [ -z "${pid}" ]; then
+        return 1
+    fi
+
+    if ! kill -0 "${pid}" 2>/dev/null; then
+        return 1
+    fi
+
+    #local starttime="$(printf "%s\\n" "${contents}" |grep "started:")"
+    #starttime="${starttime#*:}"
+    #STRING_TRIM "starttime"
+
+    ## TODO: make ps work with busybox
+    #local starttime2=
+    #if ! starttime2="$(ps --no-headers -p "${pid}" -o lstart)"; then
+        #return 1
+    #fi
+
+    # Convert to UNIX time.
+    # TODO: this it shakey. starttime can be greater then starttime2
+    #local starttime3=
+    #starttime3="$(date --date="${starttime2}" +%s)"
+
+    #if [ "${starttime}" != "${starttime3}" ]; then
+        #return 1
+    #fi
+
+    printf "%s\\n" "${pid}"
+}
+
+_SHOW_STATUS()
+{
+    local statusFile="${POD_FILE}.status"
+
+    if [ ! -f "${statusFile}" ]; then
+        printf "%s\\n" "pod: ${POD}
+status: non-existing"
+        return
+    fi
+
+    # Read the file
+    local contents=
+    contents="$(cat "${statusFile}")"
+
+    # Check so that PID still exists
+    local pid="$(printf "%s\\n" "${contents}" |grep "pid:")"
+    pid="${pid#*:}"
+    STRING_TRIM "pid"
+    if [ -n "${pid}" ] && ! kill -0 "${pid}" 2>/dev/null; then
+        printf "%s\\n" "pod: ${POD}
+status: unknown"
+    else
+        printf "%s\\n" "${contents}"
+    fi
+}
+
+STRING_TRIM()
+{
+    # shellcheck disable=SC2034
+    local __sopriv=
+    eval "__sopriv=\"\${${1}}\""
+    # shellcheck disable=SC2034
+    local __tab="	"
+    while true; do
+        eval "${1}=\"\${$1#\"\${$1%%[! ]*}\"}\""
+        eval "${1}=\"\${$1%\"\${$1##*[! ]}\"}\""
+        eval "${1}=\"\${$1#\"\${$1%%[!\$__tab]*}\"}\""
+        eval "${1}=\"\${$1%\"\${$1##*[!\$__tab]}\"}\""
+        if eval "[ \"\${${1}}\" = \"\${__sopriv}\" ]"; then
+            break
+        fi
+        eval "__sopriv=\"\${${1}}\""
+    done
+}
+
+FILE_STAT()
+{
+    local _SPACE_NAME="FILE_STAT"
+
+    local file="${1}"
+    shift
+
+    local format="${1}"
+    shift
+
+    #
+    # Check for BSD stat
+    if command -v "pkg" >/dev/null || command -v "brew" >/dev/null ; then
+        # Translate format options
+        format=$(printf "%s" "${format}" | sed -e s'/%a/%A/g' -e s'/%n/%N/g' -e s'/%U/%Su/g' -e s'/%G/%Sg/g' -e s'/%Y/%m/g')
+        stat -f "${format}" "${file}"
+    else
+        stat -c "${format}" "${file}"
+    fi
+
+    if [ "$?" -gt 0 ]; then
+        PRINT "Failed to stat file: ${file}." "error"
+        return 1
+    fi
+}
+
+# Read on STDIN and write to "file",
+# when file grows over "maxFileSize" "file" is rotated out
+# and a new "file" is created.
+_LOG_FILE()
+{
+    local file="${1}"
+    shift
+
+    local maxFileSize="${1:-0}"
+
+    local prevTS=""
+    local ts=""
+
+    local index="0"
+    local line=
+    while IFS='' read -r line; do
+        # Check if regular file and if size if overdue
+        if [ "${maxFileSize}" -gt 0 ] && [ -f "${file}" ]; then
+            local size="$(FILE_STAT "${file}" "%s")"
+            if [ "${size}" -gt "${maxFileSize}" ]; then
+                mv "${file}" "${file}.$(date +%s)"
+            fi
+        fi
+        ts="$(date +%s)"
+        if [ "${ts}" = "${prevTS}" ]; then
+            index="$((index+1))"
+        else
+            index="0"
+            prevTS="${ts}"
+        fi
+        printf "%s %s %s\\n" "${ts}" "${index}" "${line}" >>"${file}"
+    done
+}
+
+# Process which will tend to the state of the pod
+# Listen to signal TERM or HUP which means terminate proxy process
+# Listen to signal USR2 which means kill proxy preocess
+# If the proxy process is ended then the daemon will clean up and exit.
+_DAEMON_PROCESS()
+{
+    local created="$(date +%s)"
+    local started="${created}"
+
+    # $$ does not work in a forked process using shell,
+    # so we use this trick to get our PID.
+    local pid="$(sh -c 'echo $PPID')"
+
+    # The caller is awaiting the pid on FD 3
+    printf "%s\\n" "${pid}" >&3
+
+    local signalStop=0
+    local signalKill=0
+
+    trap 'signalStop=1' TERM HUP
+    trap 'signalKill=1' USR2
+
+    PRINT "Proxy daemon started with pid ${pid}" "info" 0
+
+    local proxyPid=
+    (
+        ${PROXYEXEC}
+    ) &
+    proxyPid="$!"
+
+    PRINT "Proxy daemon started proxy process with pid ${proxyPid}" "info" 0
+
+    _WRITE_STATUS_FILE "${created}" "${started}" "running" "1" "${pid}"
+
+    while kill -0 "${proxyPid}" 2>/dev/null && [ "${signalStop}" = "0" ] && [ "${signalKill}" = "0" ]; do
+        sleep 1
+    done
+
+    ## End proxy process and daemon
+
+    # Clear traps
+    trap - USR2 TERM HUP
+
+    if kill -0 "${proxyPid}" 2>/dev/null; then
+        # Process till running, check whether to stop or kill it.
+        if [ "${signalKill}" = "1" ]; then
+            kill -9 "${proxyPid}"
+        else
+            kill "${proxyPid}"
+        fi
+    fi
+
+    PRINT "Daemon with pid ${pid} exited" "info" 0
+
+    _WRITE_STATUS_FILE "${created}" "${started}" "exited" "0" ""
+}
+
+_WRITE_STATUS_FILE()
+{
+    local _SPACE_NAME="_WRITE_STATUS_FILE"
+
+    local created="${1}"
+    shift
+
+    local started="${1}"
+    shift
+
+    local status="${1}"
+    shift
+
+    local readiness="${1}"
+    shift
+
+    local pid="${1}"
+    shift
+
+    local statusFile="${POD_FILE}.status"
+    local updated="$(date +%s)"
+
+    local contents="pod: ${POD}
+created: ${created}
+started: ${started}
+updated: ${updated}
+status: ${status}
+pid: ${pid}
+readiness: ${readiness}
+"
+
+    printf "%s" "${contents}" >"${statusFile}.tmp"
+    mv -f "${statusFile}.tmp" "${statusFile}"
+}
+
+# Create the daemon process and outputs its pid on stdout.
+#
+# The script must have been invoked using `setsid` when calling this function.
+# setsid creates a new session id for this process.
+# When forking our new pid is != gpid and != sid, meaning we can become a daemon process.
+# We need to close stdin/out/err also,
+# we are already cd'd to pod dir, which is expected to never be unmounted.
+_CREATE_FORK()
+{
+    local stdoutLog="${POD_LOG_DIR}/proxy-stdout.log"
+    local stderrLog="${POD_LOG_DIR}/proxy-stderr.log"
+
+    # Need a way of getting the (right) PID out,
+    # which is non trivial since we have some piping action going on.
+    local pipe="$(mktemp -u)"
+    mkfifo "${pipe}"
+    exec 3<>"${pipe}"
+
+    (
+        # Close file descriptors
+        exec 0<&-
+        exec 1>&-
+        exec 2>&-
+        { _DAEMON_PROCESS |_LOG_FILE "${stdoutLog}" "${MAX_LOG_FILE_SIZE}"; } 2>&1 |
+            _LOG_FILE "${stderrLog}" "${MAX_LOG_FILE_SIZE}"
+    ) &
+
+    local pid=
+    while IFS= read -r pid; do
+        break
+    done <"${pipe}"
+    exec 3>&-
+    rm "${pipe}"
+
+    printf "%s\\n" "${pid}"
+}
+
+_LOGS()
+{
+    local timestamp="0"
+
+    local limit="0"
+
+    local streams="stdout stderr"
+
+    local details="ts name"
+
+    local showProcessLog="true"
+
+    local containers="proxy"
+
+    # For each container, check if there are logfiles for the streams chosen,
+    # check rotated out logfiles and choose the ones older than ts given.
+    local files=""
+    for container in ${containers}; do
+        local stream=
+        for stream in ${streams}; do
+            # Check current file
+            local filePath="${POD_LOG_DIR}/${container}-${stream}.log"
+            if [ -f "${filePath}" ]; then
+                files="${files} ${filePath}"
+            fi
+            # Check older files
+            for filePath in $(find . -maxdepth 1 -wholename "${POD_LOG_DIR}/${container}-${stream}.log.*" |cut -b3-); do
+                local ts="${file##*.}"
+                if [ "${timestamp}" -le "${ts}" ]; then
+                    files="${files} ${filePath}"
+                fi
+            done
+        done
+    done
+
+    local columns=""
+    local detail=
+    for detail in ${details}; do
+        local arg=""
+        if [ "${detail}" = "ts" ]; then
+            arg='\4'
+        elif [ "${detail}" = "name" ]; then
+            arg='\1'
+        elif [ "${detail}" = "stream" ]; then
+            arg='\2'
+        elif [ "${detail}" = "age" ]; then
+            arg='\3'
+        fi
+        columns="${columns}${columns:+ }${arg}"
+    done
+    columns="${columns}${columns:+ }\\6"
+
+    local now="$(date +%s)"
+
+    # For all applicable files, filter each line on timestamp and prepend with container
+    # name and stream name.
+    # Cat all files together, with prefixes, filter out on time, Sort on time
+    local filePath=
+    for filePath in ${files}; do
+        local file="${filePath##*/}"
+        local container="${file%-${POD}*}"
+        if [ "${container}" = "${file}" ]; then
+            # This happens for the pod
+            container="<pod>"
+        fi
+        local stream="${file%.log*}"
+        stream="${stream##*-}"
+        # Columns: container stream age timestamp index rest-of-line
+        awk '{if ($1 >= '"${timestamp}"') {age='"${now}"'-$1; print "'"${container}"' '"${stream}"' " age " " $0}}' "${filePath}"
+    done |sort -k4,4n -k5,5n |
+        {
+            if [ "${limit}" = 0 ]; then
+                :
+                cat
+            else
+                if [ "${limit}" -lt 0 ]; then
+                    tail -n"${limit#-}"
+                else
+                    head -n"${limit}"
+                fi
+            fi
+        } |
+        {
+            # Only show the relevant columns
+            sed "s/\\([^ ]\+\\) \\([^ ]\\+\\) \\([^ ]\\+\\) \\([^ ]\\+\\) \\([^ ]\\+\\) \\(.*\\)/${columns}/"
+        }
+}
+
+_POD_ENTRY()
+{
+    local MAX_LOG_FILE_SIZE="10485760"  # 10 MiB large log files, then rotating.
+    local POD="proxy"
+
+    # Set POD_DIR
+    local POD_DIR="${0%/*}"
+    if [ "${POD_DIR}" = "${0}" ]; then
+        # This is weird, not slash in path, but we will handle it.
+        if [ -f "./${0}" ]; then
+            # This happens when the script is invoked as `sh pod`.
+            POD_DIR="${PWD}"
+        else
+            PRINT "Could not determine the base dir for the pod" 0
+            return 1
+        fi
+    fi
+    POD_DIR="$(cd "${POD_DIR}" && pwd)"
+    local start_dir="$(pwd)"
+
+    if [ "${POD_DIR}" != "${start_dir}" ]; then
+        PRINT "Changing CWD to pod dir: ${POD_DIR}" "debug" 0
+        cd "${POD_DIR}"
+    fi
+
+
+    local POD_FILE="${POD_DIR}/${0##*/}"
+
+    local POD_LOG_DIR="${POD_DIR}/log"
+    mkdir -p "${POD_LOG_DIR}"
+
+    # TODO: FIXME: This is for now, the cmd args should
+    # instead be provided by the pod compiler.
+    local proxyConf="./config/_dev.conf/proxy.conf";
+    if [ ! -f "${proxyConf}" ]; then
+        proxyConf="./config/conf/proxy.conf";
+    fi
+    local PROXYEXEC="${POD_DIR}/config/executable/proxy ${proxyConf}";
+
+    local action="${1:-help}"
+    shift $(($# > 0 ? 1 : 0))
+
+    if [ "${action}" = "help" ]; then
+        :
+    elif [ "${action}" = "version" ]; then
+        :
+    elif [ "${action}" = "info" ]; then
+        :
+    elif [ "${action}" = "status" ]; then
+        _SHOW_STATUS
+    elif [ "${action}" = "download" ]; then
+        :
+    elif [ "${action}" = "create" ]; then
+        :
+    elif [ "${action}" = "porcelain-create" ]; then
+        _CREATE_FORK
+    elif [ "${action}" = "start" ]; then
+        _START
+    elif [ "${action}" = "stop" ]; then
+        _STOP
+    elif [ "${action}" = "kill" ]; then
+        _KILL
+    elif [ "${action}" = "run" ]; then
+        _START
+    elif [ "${action}" = "rerun" ]; then
+        _STOP
+        # TODO: gotta wait until it has gone before starting
+        _START
+    elif [ "${action}" = "signal" ]; then
+        :
+    elif [ "${action}" = "logs" ]; then
+        _LOGS
+    elif [ "${action}" = "create-volumes" ]; then
+        :
+    elif [ "${action}" = "create-ramdisks" ]; then
+        :
+    elif [ "${action}" = "reload-configs" ]; then
+        :
+    elif [ "${action}" = "rm" ]; then
+        _STOP
+        :
+    elif [ "${action}" = "purge" ]; then
+        :
+    elif [ "${action}" = "shell" ]; then
+        :
+    else
+        PRINT "Unknown command" "error" 0
+        return 1
+    fi
+
+    local status="$?"
+    cd "${start_dir}" 2>/dev/null
+    return "${status}"
+}
+
+_POD_ENTRY "$@"
