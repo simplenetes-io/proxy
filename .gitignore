@@ -1,3 +1,6 @@
 log
-.*.yaml
-*.status
+pod
+.pod.yaml
+.pod.status
+.pod.portmappings.conf
+.pod.ingress.conf
