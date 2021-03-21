@@ -506,7 +506,7 @@ _POD_ENTRY()
         :
     elif [ "${action}" = "info" ]; then
         :
-    elif [ "${action}" = "status" ]; then
+    elif [ "${action}" = "ps" ]; then
         _SHOW_STATUS
     elif [ "${action}" = "download" ]; then
         :
@@ -525,6 +525,7 @@ _POD_ENTRY()
     elif [ "${action}" = "rerun" ]; then
         _STOP
         # TODO: gotta wait until it has gone before starting
+        sleep 10
         _START
     elif [ "${action}" = "signal" ]; then
         :
