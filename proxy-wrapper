@@ -92,6 +92,8 @@ _START()
 _DAEMON_PID()
 {
     local statusFile="${POD_FILE}.status"
+    # Make into dotfile
+    statusFile="${statusFile%/*}/.${statusFile##*/}"
 
     if [ ! -f "${statusFile}" ]; then
         return
@@ -139,6 +141,8 @@ _DAEMON_PID()
 _SHOW_STATUS()
 {
     local statusFile="${POD_FILE}.status"
+    # Make into dotfile
+    statusFile="${statusFile%/*}/.${statusFile##*/}"
 
     if [ ! -f "${statusFile}" ]; then
         printf "%s\\n" "pod: ${POD}
@@ -318,6 +322,8 @@ _WRITE_STATUS_FILE()
     shift
 
     local statusFile="${POD_FILE}.status"
+    # Make into dotfile
+    statusFile="${statusFile%/*}/.${statusFile##*/}"
     local updated="$(date +%s)"
 
     local contents="pod: ${POD}

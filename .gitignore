@@ -1,6 +1,6 @@
 log
 pod
 .pod.yaml
-.pod.status
+.proxy-wrapper.status
 pod.portmappings.conf
 pod.ingress.conf
