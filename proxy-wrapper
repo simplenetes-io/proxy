@@ -3,7 +3,7 @@
 # This is a wrapper over the proxy, it implements some of the Simplenetes Pod API so it can be managed as a Simplenetes Pod.
 # Note that all functions here have been manually extracted from the podman-runtime script.
 
-export LOG_LEVEL=debug
+#export LOG_LEVEL=debug
 
 PRINT()
 {
